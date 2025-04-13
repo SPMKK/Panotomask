@@ -87,7 +87,7 @@ class PanoramaProcessor:
         y = H / 2 - v
         z = torch.full_like(x, f)
 
-        norm = torch.sqrt(x ** 2 + y ** 2 + z ** 2)
+        norm = torch.sqrt(x * 2 + y * 2 + z ** 2)
         x, y, z = x / norm, y / norm, z / norm
 
         dirs = torch.stack([x, y, z], dim=0)  # [3, H, W]
@@ -131,16 +131,20 @@ class PanoramaProcessor:
         sampled_img = (sampled.squeeze(0).permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
         return sampled_img
 
-
     def generate_all_views(self, image_path):
         pano = Image.open(image_path).convert('RGB')
         pano_tensor = torch.from_numpy(np.array(pano)).to(self.device)
 
         result_images = []
+        yaws, pitches = [], []
+
         for yaw in np.linspace(0, 360, 16):
             for pitch in [30, 60, 90, 120, 150]:
-                view = self._panorama_to_plane(pano_tensor, 100, (640, 640), yaw, pitch)
+                view = self._panorama_to_plane(pano_tensor, 100, (512, 512), yaw, pitch)
                 result_images.append(view)
+                yaws.append(yaw)
+                pitches.append(pitch)
+
         return result_images
 
 class ObjectDetector:
@@ -148,37 +152,40 @@ class ObjectDetector:
         self.model = YOLO(model_path)
         self.important_classes = important_classes  # list of int
 
+    # def object_alignment_score(self, box, img_w, img_h, conf):
+    #     x_center, y_center, w, h = box
+
+    #     dx = (x_center - img_w / 2) / (img_w / 2)
+    #     dy = (y_center - img_h / 2) / (img_h / 2)
+    #     distance = np.sqrt(dx**2 + dy**2)
+
+    #     center_bonus = np.exp(-5 * distance)  # càng gần trung tâm càng tốt
+    #     size_score = w * h / (img_w * img_h)  # phần trăm diện tích
+    #     return conf * center_bonus * size_score
+    
     def compute_box_score(self, box, img_w, img_h, conf, cls_id):
         x_center, y_center, w, h = box
 
-        # Distance to center (normalized)
-        dx = abs(x_center - img_w / 2) / img_w
-        dy = abs(y_center - img_h / 2) / img_h
-        center_weight = 1 - (dx + dy) / 2  # closer to center = higher weight
+        dx = (x_center - img_w / 2) / (img_w / 2)
+        dy = (y_center - img_h / 2) / (img_h / 2)
+        distance_sq = dx * 2 + dy * 2
+        center_weight = np.exp(-4 * distance_sq)  # Gaussian drop-off
 
-        # Class weight (if defined)
-        class_weight = 1.0
-        if self.important_classes and int(cls_id) in self.important_classes:
-            class_weight = 1.5  # boost for important class
+        class_weight = 1.5 if self.important_classes and int(cls_id) in self.important_classes else 1.0
 
-        # Final box score
         return w * h * conf * center_weight * class_weight
 
     def get_best_view(self, images):
-        max_score = 0
         best_img = None
+        best_box_score = -1
 
         for i, img in enumerate(images):
             result = self.model(img, verbose=False)[0]
-
-            score = 0
             if hasattr(result, "boxes") and result.boxes and result.boxes.xywh is not None:
-                boxes = result.boxes.xywh.cpu().numpy()  # [N, 4]
+                boxes = result.boxes.xywh.cpu().numpy()
                 confs = result.boxes.conf.cpu().numpy()
                 clses = result.boxes.cls.cpu().numpy()
                 img_h, img_w = img.shape[:2]
-
-                valid_box_count = 0
 
                 for j, box in enumerate(boxes):
                     x_center, y_center, w, h = box
@@ -187,31 +194,20 @@ class ObjectDetector:
                     x_max = x_center + w / 2
                     y_max = y_center + h / 2
 
-                    margin_w = 0.05 * img_w
-                    margin_h = 0.05 * img_h
+                    if x_min <= 0 or y_min <= 0 or x_max >= img_w or y_max >= img_h:
+                        continue  # Skip box bị cắt
 
-                    if (
-                        x_min > margin_w and y_min > margin_h and
-                        x_max < img_w - margin_w and y_max < img_h - margin_h
-                    ):
-                        conf = confs[j]
-                        cls_id = clses[j]
-                        box_score = self.compute_box_score(box, img_w, img_h, conf, cls_id)
-                        score += box_score
-                        valid_box_count += 1
+                    conf = confs[j]
+                    cls_id = clses[j]
+                    box_score = self.compute_box_score(box, img_w, img_h, conf, cls_id)
 
-                print(f"View {i}: {valid_box_count} valid boxes, score = {score:.2f}")
-            else:
-                print(f"View {i}: No boxes found.")
+                    if box_score > best_box_score:
+                        best_box_score = box_score
+                        best_img = img
+                        print(f"👉 View {i}: New best frontal box score = {box_score:.2f}")
 
-            if score > max_score:
-                max_score = score
-                best_img = img
-                print("This is the new best view.")
-
-        print(f"\nBest score: {max_score:.2f}")
+        print(f"\n🏆 Best frontal view score: {best_box_score:.2f}")
         return best_img
-
 
 class Maskcreation:
     def __init__(self, model_path='model/best.pt', dominant_colors=3, device='cuda'):
@@ -223,10 +219,10 @@ class Maskcreation:
         self.detector = ObjectDetector(model_path=self.model_path)
         self.color_extractor = DominantColorExtractor(n_colors=self.dominant_colors)
 
-        # self.output_dir = self._create_output_folder('output_masks')  # <-- Bỏ comment để bật lưu file
+        self.output_dir = self._create_output_folder('output_masks')  # <-- Bỏ comment để bật lưu file
 
     def _resolve_model_path(self, relative_path):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.abspath(_file_))
         abs_path = os.path.normpath(os.path.join(base_dir, '..', relative_path))
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"✘ Model file not found: {abs_path}")
@@ -264,12 +260,12 @@ class Maskcreation:
         bgr_str = ','.join(str(int(c)) for c in dominant_color[::-1])
 
         # --- Bật chức năng lưu nếu cần ---
-        # mask_path = os.path.join(self.output_dir, f"{pano_name}_mask.png")
-        # txt_path = os.path.join(self.output_dir, f"{pano_name}_color.txt")
-        # mask_img.save(mask_path)
-        # with open(txt_path, 'w') as f:
-        #     f.write(bgr_str)
-        # print(f"✓ Saved mask to {mask_path}")
-        # print(f"✓ Saved dominant color to {txt_path}")
+        mask_path = os.path.join(self.output_dir, f"{pano_name}_mask.png")
+        txt_path = os.path.join(self.output_dir, f"{pano_name}_color.txt")
+        mask_img.save(mask_path)
+        with open(txt_path, 'w') as f:
+            f.write(bgr_str)
+        print(f"✓ Saved mask to {mask_path}")
+        print(f"✓ Saved dominant color to {txt_path}")
 
         return mask_img, bgr_str

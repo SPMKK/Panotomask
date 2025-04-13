@@ -1,1 +1,1 @@
-from .mask_creator import Maskcreation
+from .Panotomask import Maskcreation
