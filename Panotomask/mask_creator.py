@@ -215,13 +215,31 @@ class ObjectDetector:
 
 class Maskcreation:
     def __init__(self, model_path='model/best.pt', dominant_colors=3, device='cuda'):
-        self.model_path = model_path
+        self.model_path = self._resolve_model_path(model_path)
         self.dominant_colors = dominant_colors
         self.device = device
 
         self.processor = PanoramaProcessor(device=self.device)
         self.detector = ObjectDetector(model_path=self.model_path)
         self.color_extractor = DominantColorExtractor(n_colors=self.dominant_colors)
+
+        # self.output_dir = self._create_output_folder('output_masks')  # <-- Bỏ comment để bật lưu file
+
+    def _resolve_model_path(self, relative_path):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        abs_path = os.path.normpath(os.path.join(base_dir, '..', relative_path))
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"✘ Model file not found: {abs_path}")
+        return abs_path
+
+    def _create_output_folder(self, folder_name='output'):
+        folder_path = os.path.abspath(folder_name)
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+            print(f"✓ Created output folder at: {folder_path}")
+        else:
+            print(f"• Output folder already exists: {folder_path}")
+        return folder_path
 
     def __call__(self, image_path):
         pano_name = os.path.splitext(os.path.basename(image_path))[0]
@@ -242,8 +260,16 @@ class Maskcreation:
         box = results.boxes.xywhn.cpu().numpy()[0]
         dominant_color = self.color_extractor.extract_from_box(best_img_pil, box)[0]
 
-        # Tạo ảnh mask giữ lại dominant
         mask_img = self.color_extractor.get_masked_image(best_img_pil, box, tolerance=30)
-        # Trả về kết quả
         bgr_str = ','.join(str(int(c)) for c in dominant_color[::-1])
-        return mask_img, bgr_str 
+
+        # --- Bật chức năng lưu nếu cần ---
+        # mask_path = os.path.join(self.output_dir, f"{pano_name}_mask.png")
+        # txt_path = os.path.join(self.output_dir, f"{pano_name}_color.txt")
+        # mask_img.save(mask_path)
+        # with open(txt_path, 'w') as f:
+        #     f.write(bgr_str)
+        # print(f"✓ Saved mask to {mask_path}")
+        # print(f"✓ Saved dominant color to {txt_path}")
+
+        return mask_img, bgr_str
