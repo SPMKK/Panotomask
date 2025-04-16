@@ -3,75 +3,80 @@ import os
 import cv2
 import argparse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import torch
 from ultralytics import YOLO
 from sklearn.cluster import KMeans
 
 
 class DominantColorExtractor:
-    def __init__(self, n_colors=1):
-        self.n_colors = n_colors
+    def __init__(self, rgb):
+        self.rgb = rgb
 
-    def extract_from_box(self, image, box):
-        """
-        Trích xuất màu chủ đạo từ bounding box.
-        Lọc bỏ:
-        - Màu đen (R, G, B < 30)
-        - Màu trắng (R, G, B > 225)
-        - Màu xám nhạt (R, G, B > 125 tất cả)
-        """
-        W, H = image.size
-        x, y, w, h = box
-        left = int((x - w / 2) * W)
-        top = int((y - h / 2) * H)
-        right = int((x + w / 2) * W)
-        bottom = int((y + h / 2) * H)
+    # def extract_from_box(self, image, box):
+    #     """
+    #     Trích xuất màu chủ đạo từ bounding box.
+    #     Lọc bỏ:
+    #     - Màu đen (R, G, B < 30)
+    #     - Màu trắng (R, G, B > 225)
+    #     - Màu xám nhạt (R, G, B > 125 tất cả)
+    #     """
+    #     W, H = image.size
+    #     x, y, w, h = box
+    #     left = int((x - w / 2) * W)
+    #     top = int((y - h / 2) * H)
+    #     right = int((x + w / 2) * W)
+    #     bottom = int((y + h / 2) * H)
 
-        cropped = image.crop((left, top, right, bottom))
-        img_np = np.array(cropped).reshape(-1, 3)
+    #     cropped = image.crop((left, top, right, bottom))
+    #     img_np = np.array(cropped).reshape(-1, 3)
 
-        if len(img_np) < self.n_colors:
-            return [(0, 0, 0)]
+    #     if len(img_np) < self.n_colors:
+    #         return [(0, 0, 0)]
 
-        kmeans = KMeans(n_clusters=self.n_colors, random_state=42, n_init='auto')
-        kmeans.fit(img_np)
-        colors = kmeans.cluster_centers_.astype(int)
+    #     kmeans = KMeans(n_clusters=self.n_colors, random_state=42, n_init='auto')
+    #     kmeans.fit(img_np)
+    #     colors = kmeans.cluster_centers_.astype(int)
 
-        def is_invalid(rgb):
-            r, g, b = rgb
-            return (
-                (r < 30 and g < 30 and b < 30) or       # đen
-                (r > 225 and g > 225 and b > 225) or    # trắng
-                (r > 100 and g > 100 and b > 100)       # xám nhạt
-            )
+    #     def is_invalid(rgb):
+    #         r, g, b = rgb
+    #         return (
+    #             (r < 30 and g < 30 and b < 30) or       # đen
+    #             (r > 225 and g > 225 and b > 225) or    # trắng
+    #             (r > 100 and g > 100 and b > 100)       # xám nhạt
+    #         )
 
-        filtered = [tuple(c) for c in colors if not is_invalid(c)]
+    #     filtered = [tuple(c) for c in colors if not is_invalid(c)]
 
-        if not filtered:
-            return [tuple(colors[0])]  # fallback: vẫn trả về 1 màu nếu bị loại hết
+    #     if not filtered:
+    #         return [tuple(colors[0])]  # fallback: vẫn trả về 1 màu nếu bị loại hết
 
-        return filtered
+    #     return filtered
 
 
 
-    def get_masked_image(self, image, box, tolerance=30):
+    def get_masked_image(self,image, tolerance=50, blur_ksize=9):
         """
         Dùng dominant color từ bbox để lọc toàn ảnh:
         Giữ lại các pixel toàn ảnh có màu gần với dominant color, các pixel còn lại chuyển thành trắng.
         """
         img_np = np.array(image).copy()
 
-        # Lấy dominant color từ bbox
-        dominant_color = self.extract_from_box(image, box)[0]
+        # # Lấy dominant color từ bbox
+        # dominant_color = self.extract_from_box(image, box)[0]
 
         # Tính khoảng cách màu cho toàn ảnh
-        dist = np.linalg.norm(img_np - np.array(dominant_color), axis=2)
+        dist = np.linalg.norm(img_np - np.array(self.rgb), axis=2)
         mask = dist < tolerance  # giữ pixel gần màu chủ đạo
 
+        mask = mask.astype(np.uint8) * 255
+        mask_blur = cv2.GaussianBlur(mask, (blur_ksize, blur_ksize), 0)
+        mask_blur = mask_blur.astype(np.float32) / 255.0  # đưa về [0,1] để blend
+
         # Tạo ảnh trắng và gán pixel gốc vào vùng mask
-        new_img = np.ones_like(img_np) * 255
-        new_img[mask] = img_np[mask]
+        new_img = np.ones_like(img_np, dtype=np.float32) * 255
+        new_img = img_np * mask_blur[..., None] + new_img * (1 - mask_blur[..., None])
+        new_img = np.clip(new_img, 0, 255).astype(np.uint8)
 
         return Image.fromarray(new_img)
 
@@ -146,7 +151,7 @@ class PanoramaProcessor:
 
         for yaw in np.linspace(0, 360, 16):
             for pitch in [30, 60, 90, 120, 150]:
-                view = self._panorama_to_plane(pano_tensor, 120, (512, 512), yaw, pitch)
+                view = self._panorama_to_plane(pano_tensor, 110, (512, 512), yaw, pitch)
                 result_images.append(view)
                 yaws.append(yaw)
                 pitches.append(pitch)
@@ -182,13 +187,14 @@ class ObjectDetector:
                         min_dist = dist
 
                 scored_images.append((min_dist, img))
-                print(f"View {i}: Min distance to center = {min_dist:.2f}")
-            else:
-                print(f"View {i}: No boxes found.")
+            #     print(f"View {i}: Min distance to center = {min_dist:.2f}")
+            # else:
+            #     print(f"View {i}: No boxes found.")
                 scored_images.append((float('inf'), img))
         scored_images.sort(key=lambda x: x[0])
         top5_imgs = [img for _, img in scored_images[:5]]
         return top5_imgs
+
 
     def select_by_dominant_color(self, images, rgb_color, tolerance=30, max_deviation=10):
         """
@@ -211,10 +217,10 @@ class ObjectDetector:
         for i, img in enumerate(images):
             score = color_match_score(img)
             scores.append((score, img))
-            print(f"Image {i}: Matching pixels = {score}")
+            # print(f"Image {i}: Matching pixels = {score}")
 
-        best_img = max(scores, key=lambda x: x[0])[1]
-        return best_img
+        best_score, best_img = max(scores, key=lambda x: x[0])
+        return best_img, best_score
 
 class Maskcreation:
     def __init__(self, model_path='model/best.pt', dominant_colors=3, device='cuda'):
@@ -224,11 +230,11 @@ class Maskcreation:
 
         self.processor = PanoramaProcessor(device=self.device)
         self.detector = ObjectDetector(model_path=self.model_path)
-        self.color_extractor = DominantColorExtractor(n_colors=self.dominant_colors)
+        self.color_extractor = DominantColorExtractor(rgb = (135, 206, 235))
 
         self.output_dir = self._create_output_folder('output_masks')  # <-- Bỏ comment để bật lưu file
-        self.all_view = self._create_output_folder('all_view')
-        self.top5 = self._create_output_folder('top5')
+        # # self.all_view = self._create_output_folder('all_view')    # Bật để tạo folder
+        # self.top5 = self._create_output_folder('top5')   # Bật để tạo folder
     def _resolve_model_path(self, relative_path):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         abs_path = os.path.normpath(os.path.join(base_dir, '..', relative_path))
@@ -257,30 +263,31 @@ class Maskcreation:
 
         # Lấy top 5 ảnh có bbox gần tâm nhất
         top5_imgs = self.detector.get_top5_by_center_distance(views)
-        for inx, rank in enumerate(top5_imgs):
-            rank_img = Image.fromarray(rank)
-            rank_path = os.path.join(self.top5, f"{pano_name}_top{inx+1}.png")
-            rank_img.save(rank_path)
+        # -----Luư top 5 --------
+        # for inx, rank in enumerate(top5_imgs):
+        #     rank_img = Image.fromarray(rank)
+        #     rank_path = os.path.join(self.top5, f"{pano_name}_top{inx+1}.png")
+        #     rank_img.save(rank_path)
         if not top5_imgs:
             print("✘ No valid views found.")
             return None, None
 
         # Dùng ảnh đầu tiên trong top 5 để lấy dominant color từ box đầu tiên
-        first_img = top5_imgs[0]
-        results = self.detector.model(first_img, verbose=False)[0]
+        # first_img = top5_imgs[0]
+        # results = self.detector.model(first_img, verbose=False)[0]
 
-        if results.boxes is None or len(results.boxes) == 0:
-            print("✘ No object detected in first view of top 5.")
-            return None, None
+        # if results.boxes is None or len(results.boxes) == 0:
+        #     print("✘ No object detected in first view of top 5.")
+        #     return None, None
 
         # Lấy dominant color từ box đầu tiên
-        box = results.boxes.xywhn.cpu().numpy()[0]
-        first_img_pil = Image.fromarray(first_img)
-        dominant_color = self.color_extractor.extract_from_box(first_img_pil, box)[0]
-        rgb = tuple(int(c) for c in dominant_color)
+        # box = results.boxes.xywhn.cpu().numpy()[0]
+        # first_img_pil = Image.fromarray(first_img)
+        # dominant_color = self.color_extractor.extract_from_box(first_img_pil, box)[0]
+        rgb = (135, 206, 235)
 
         # Tìm ảnh trong top 5 có nhiều pixel trùng màu nhất với dominant color
-        best_img_np = self.detector.select_by_dominant_color(top5_imgs, rgb)
+        best_img_np, best_score = self.detector.select_by_dominant_color(top5_imgs,rgb)
 
         if best_img_np is None:
             print("✘ No best image found by dominant color.")
@@ -289,27 +296,109 @@ class Maskcreation:
         best_img_pil = Image.fromarray(best_img_np)
 
         # --- Lưu best view ---
-        best_view_path = os.path.join(self.output_dir, f"{pano_name}_best_view.png")
-        best_img_pil.save(best_view_path)
-        print(f"✓ Saved best view image to {best_view_path}")
+        # best_view_path = os.path.join(self.output_dir, f"{pano_name}_best_view.png")
+        # best_img_pil.save(best_view_path)
+        # print(f"✓ Saved best view image to {best_view_path}")
 
         # Chạy YOLO để detect lại object, lấy bbox đầu tiên tạo mask
-        results = self.detector.model(best_img_np, verbose=False)[0]
+        results = self.detector.model(best_img_pil, verbose=False)[0]
         if results.boxes is None or len(results.boxes) == 0:
             print("✘ No object detected in final best view.")
             return None, None
 
         box = results.boxes.xywhn.cpu().numpy()[0]
-        mask_img = self.color_extractor.get_masked_image(best_img_pil, box, tolerance=30)
-
+        mask_img = self.color_extractor.get_masked_image(best_img_pil, tolerance=50)
+        mask_img = crop_and_resize(mask_img, box, best_score)
         # --- Lưu mask và dominant color ---
         mask_path = os.path.join(self.output_dir, f"{pano_name}_mask.png")
         txt_path = os.path.join(self.output_dir, f"{pano_name}_color.txt")
         mask_img.save(mask_path)
-        with open(txt_path, 'w') as f:
-            f.write(str(rgb))
+        # with open(txt_path, 'w') as f:
+        #     f.write(str(rgb))
 
         print(f"✓ Saved mask to {mask_path}")
-        print(f"✓ Saved dominant color to {txt_path}")
+        # print(f"✓ Saved dominant color to {txt_path}")
+        print("Mask create successfully", rgb)
+        return mask_img
 
-        return mask_img, rgb
+
+
+def crop_and_resize(mask_img, box, best_score, output_size=(512, 512), zoom_scale=2):
+    """
+    Xử lý mask theo best_score:
+    - Nếu best_score < 5000: zoom vào object, rồi đặt vào ảnh 512x512, tô trắng xung quanh.
+    - Nếu 5000 <= best_score < 11000: giữ nguyên ảnh, chỉ tô trắng ngoài bbox.
+    - Nếu >= 11000: trả lại ảnh gốc.
+
+    Args:
+        mask_img (PIL.Image): ảnh mask gốc.
+        box (tuple): bbox YOLO (x_center, y_center, w, h), chuẩn hóa (0-1).
+        best_score (float): điểm số.
+        output_size (tuple): kích thước đích.
+        zoom_scale (float): tỉ lệ zoom vào vật.
+
+    Returns:
+        PIL.Image: ảnh đã xử lý.
+    """
+    W, H = mask_img.size
+    x, y, w, h = box
+
+    # bbox gốc (tính theo pixel)
+    x_center = x * W
+    y_center = y * H
+    box_w = w * W
+    box_h = h * H
+
+    if best_score < 5000:
+        # Crop vùng bbox nhỏ trước
+        left = int(x_center - box_w / 2)
+        top = int(y_center - box_h / 2)
+        right = int(x_center + box_w / 2)
+        bottom = int(y_center + box_h / 2)
+
+        # Clamp
+        left = max(0, left)
+        top = max(0, top)
+        right = min(W, right)
+        bottom = min(H, bottom)
+
+        cropped = mask_img.crop((left, top, right, bottom))
+
+        # Zoom vào (resize object lên)
+        zoomed_w = int(cropped.width * zoom_scale)
+        zoomed_h = int(cropped.height * zoom_scale)
+        zoomed = cropped.resize((zoomed_w, zoomed_h), Image.LANCZOS)
+
+        # Tạo canvas trắng 512x512 và paste vào giữa
+        canvas = Image.new(mask_img.mode, output_size, 255 if mask_img.mode == "L" else (255, 255, 255))
+        paste_x = (output_size[0] - zoomed_w) // 2
+        paste_y = (output_size[1] - zoomed_h) // 2
+
+        # Cắt nếu object quá to
+        zoomed = zoomed.crop((
+            max(0, -paste_x),
+            max(0, -paste_y),
+            min(zoomed_w, output_size[0] - paste_x),
+            min(zoomed_h, output_size[1] - paste_y)
+        ))
+
+        paste_x = max(0, paste_x)
+        paste_y = max(0, paste_y)
+        canvas.paste(zoomed, (paste_x, paste_y))
+        return canvas
+
+    elif best_score < 11000:
+        # Tô trắng vùng ngoài bbox
+        white = Image.new(mask_img.mode, (W, H), 255 if mask_img.mode == "L" else (255, 255, 255))
+        left = int((x - w / 2) * W)
+        top = int((y - h / 2) * H)
+        right = int((x + w / 2) * W)
+        bottom = int((y + h / 2) * H)
+        left, top, right, bottom = max(0, left), max(0, top), min(W, right), min(H, bottom)
+
+        region = mask_img.crop((left, top, right, bottom))
+        white.paste(region, (left, top))
+        return white
+
+    
+    return mask_img
