@@ -151,7 +151,7 @@ class PanoramaProcessor:
 
         for yaw in np.linspace(0, 360, 16):
             for pitch in [30, 60, 90, 120, 150]:
-                view = self._panorama_to_plane(pano_tensor, 110, (512, 512), yaw, pitch)
+                view = self._panorama_to_plane(pano_tensor, 100, (512, 512), yaw, pitch)
                 result_images.append(view)
                 yaws.append(yaw)
                 pitches.append(pitch)
@@ -187,9 +187,9 @@ class ObjectDetector:
                         min_dist = dist
 
                 scored_images.append((min_dist, img))
-            #     print(f"View {i}: Min distance to center = {min_dist:.2f}")
-            # else:
-            #     print(f"View {i}: No boxes found.")
+                print(f"View {i}: Min distance to center = {min_dist:.2f}")
+            else:
+                print(f"View {i}: No boxes found.")
                 scored_images.append((float('inf'), img))
         scored_images.sort(key=lambda x: x[0])
         top5_imgs = [img for _, img in scored_images[:5]]
@@ -217,7 +217,7 @@ class ObjectDetector:
         for i, img in enumerate(images):
             score = color_match_score(img)
             scores.append((score, img))
-            # print(f"Image {i}: Matching pixels = {score}")
+            print(f"Image {i}: Matching pixels = {score}")
 
         best_score, best_img = max(scores, key=lambda x: x[0])
         return best_img, best_score
@@ -369,10 +369,11 @@ def crop_and_resize(mask_img, box, best_score, output_size=(512, 512), zoom_scal
         zoomed_h = int(cropped.height * zoom_scale)
         zoomed = cropped.resize((zoomed_w, zoomed_h), Image.LANCZOS)
 
-        # Tạo canvas trắng 512x512 và paste vào giữa
+        # Tạo canvas trắng 512x512 và paste sao cho tâm object đúng tâm bbox
         canvas = Image.new(mask_img.mode, output_size, 255 if mask_img.mode == "L" else (255, 255, 255))
-        paste_x = (output_size[0] - zoomed_w) // 2
-        paste_y = (output_size[1] - zoomed_h) // 2
+
+        paste_x = int(output_size[0] / 2 - zoomed_w / 2)
+        paste_y = int(output_size[1] / 2 - zoomed_h / 2)
 
         # Cắt nếu object quá to
         zoomed = zoomed.crop((
@@ -400,5 +401,4 @@ def crop_and_resize(mask_img, box, best_score, output_size=(512, 512), zoom_scal
         white.paste(region, (left, top))
         return white
 
-    
     return mask_img
