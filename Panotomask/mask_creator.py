@@ -150,8 +150,8 @@ class PanoramaProcessor:
         yaws, pitches = [], []
 
         for yaw in np.linspace(0, 360, 16):
-            for pitch in [30, 60, 90, 120, 150]:
-                view = self._panorama_to_plane(pano_tensor, 100, (512, 512), yaw, pitch)
+            for pitch in [30,60,90,120,150]:
+                view = self._panorama_to_plane(pano_tensor, 115, (512, 512), yaw, pitch)
                 result_images.append(view)
                 yaws.append(yaw)
                 pitches.append(pitch)
@@ -187,9 +187,9 @@ class ObjectDetector:
                         min_dist = dist
 
                 scored_images.append((min_dist, img))
-                print(f"View {i}: Min distance to center = {min_dist:.2f}")
-            else:
-                print(f"View {i}: No boxes found.")
+            #     print(f"View {i}: Min distance to center = {min_dist:.2f}")
+            # else:
+            #     print(f"View {i}: No boxes found.")
                 scored_images.append((float('inf'), img))
         scored_images.sort(key=lambda x: x[0])
         top5_imgs = [img for _, img in scored_images[:5]]
@@ -217,7 +217,7 @@ class ObjectDetector:
         for i, img in enumerate(images):
             score = color_match_score(img)
             scores.append((score, img))
-            print(f"Image {i}: Matching pixels = {score}")
+            # print(f"Image {i}: Matching pixels = {score}")
 
         best_score, best_img = max(scores, key=lambda x: x[0])
         return best_img, best_score
@@ -246,9 +246,9 @@ class Maskcreation:
         folder_path = os.path.abspath(folder_name)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
-            print(f"✓ Created output folder at: {folder_path}")
-        else:
-            print(f"• Output folder already exists: {folder_path}")
+        #     print(f"✓ Created output folder at: {folder_path}")
+        # else:
+        #     print(f"• Output folder already exists: {folder_path}")
         return folder_path
 
     def __call__(self, image_path):
@@ -270,7 +270,7 @@ class Maskcreation:
         #     rank_img.save(rank_path)
         if not top5_imgs:
             print("✘ No valid views found.")
-            return None, None
+            return None
 
         # Dùng ảnh đầu tiên trong top 5 để lấy dominant color từ box đầu tiên
         # first_img = top5_imgs[0]
@@ -288,6 +288,8 @@ class Maskcreation:
 
         # Tìm ảnh trong top 5 có nhiều pixel trùng màu nhất với dominant color
         best_img_np, best_score = self.detector.select_by_dominant_color(top5_imgs,rgb)
+        if best_score < 100000 and best_score > 2200:
+            return None, None
 
         if best_img_np is None:
             print("✘ No best image found by dominant color.")
@@ -305,7 +307,6 @@ class Maskcreation:
         if results.boxes is None or len(results.boxes) == 0:
             print("✘ No object detected in final best view.")
             return None, None
-
         box = results.boxes.xywhn.cpu().numpy()[0]
         mask_img = self.color_extractor.get_masked_image(best_img_pil, tolerance=50)
         mask_img = crop_and_resize(mask_img, box, best_score)
@@ -318,8 +319,12 @@ class Maskcreation:
 
         print(f"✓ Saved mask to {mask_path}")
         # print(f"✓ Saved dominant color to {txt_path}")
-        print("Mask create successfully", rgb)
-        return mask_img
+        print("Mask create successfully", pano_name, best_score)
+        if best_score <=2200:
+            return mask_img, 1 
+        elif best_score >=100000:
+            return mask_img, 2
+        return mask_img, 3
 
 
 
@@ -388,7 +393,7 @@ def crop_and_resize(mask_img, box, best_score, output_size=(512, 512), zoom_scal
         canvas.paste(zoomed, (paste_x, paste_y))
         return canvas
 
-    elif best_score < 11000:
+    elif best_score < 14000:
         # Tô trắng vùng ngoài bbox
         white = Image.new(mask_img.mode, (W, H), 255 if mask_img.mode == "L" else (255, 255, 255))
         left = int((x - w / 2) * W)
